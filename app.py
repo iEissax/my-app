@@ -23,68 +23,70 @@ def process_kmz(file):
         name_text = pm.xpath("./kml:name/text()", namespaces=ns)
         full_name = name_text[0].strip() if name_text else ""
 
-        # --- تحليل النمط (مثال: ق 17/5/1) ---
-        # استخراج الأرقام: 17 هو الأول (عمود)، 5 هو الثاني (فيدر)
+        # تحليل النمط (مثال: ق 17/5/1)
         numbers = re.findall(r'\d+', full_name)
-        
-        # التخصيص حسب طلبك:
-        column_num = int(numbers[0]) if len(numbers) >= 1 else 0  # الرقم الأول: العمود
-        feeder_num = int(numbers[1]) if len(numbers) >= 2 else 0  # الرقم الثاني: الفيدر
-        extra_num = numbers[2] if len(numbers) >= 3 else ""       # أي رقم ثالث إضافي
+        column_num = int(numbers[0]) if len(numbers) >= 1 else 0
+        feeder_num = int(numbers[1]) if len(numbers) >= 2 else 0
+        extra_num = numbers[2] if len(numbers) >= 3 else ""
 
-        # استخراج اسم المحطة (مثل حرف ق)
         station_part = re.search(r'[a-zA-Z\u0600-\u06FF]+', full_name)
         station_code = station_part.group(0) if station_part else ""
 
-        # تنسيق الاسم النهائي في الإكسل (العمود/الفيدر)
         formatted_name = f"{column_num}/{feeder_num}"
         if extra_num:
             formatted_name += f"/{extra_num}"
         if station_code:
             formatted_name = f"{station_code} {formatted_name}"
 
-        # البحث في الوصف والبيانات الممتدة
+        # الوصف والبيانات الممتدة
         desc = pm.xpath("./kml:description/text()", namespaces=ns)
         desc_text = desc[0] if desc else ""
         ext_vals = " ".join(pm.xpath(".//kml:Data/kml:value/text()", namespaces=ns))
         search_area = (desc_text + " " + ext_vals).strip()
 
-        # استخراج الحالة والأطوال والشمعات
         status = "مغروز" if "مغروز" in search_area else ("مفقود" if "مفقود" in search_area else "طبيعي")
         height_match = re.search(r'\b(12|10|9|8|6)\b', search_area)
         val_height = height_match.group(1) if height_match else "غير مسجل"
         lamps = 2 if "دبل" in search_area else (1 if "مفرد" in search_area else 0)
 
-        # الإحداثيات
+        # --- معالجة الإحداثيات لتطابق Map Marker ---
         coords = pm.xpath(".//kml:coordinates/text()", namespaces=ns)
-        lat, lon = (coords[0].split(',')[1], coords[0].split(',')[0]) if coords else (0,0)
+        lat, lon = 0.0, 0.0
+        if coords:
+            coord_split = coords[0].strip().split(',')
+            # في KML: الترتيب هو [Longitude, Latitude]
+            # نحن نعكسهم ليظهر Lat أولاً كما في Map Marker
+            lon_val = float(coord_split[0])
+            lat_val = float(coord_split[1])
+            
+            # تقريب لـ 5 خانات عشرية كما في مثالك (24.69230)
+            lat = "{:.5f}".format(lat_val)
+            lon = "{:.5f}".format(lon_val)
 
         data.append({
             "الاسم المنسق": formatted_name,
             "المحطة": station_code,
-            "رقم الفيدر": feeder_num,
-            "رقم العمود": column_num,
             "الحالة": status,
             "طول العمود": val_height,
             "عدد الشمعات": lamps,
-            "Lat": lat,
-            "Long": lon
+            "الإحداثيات (Lat, Long)": f"{lat},{lon}",
+            "رقم الفيدر": feeder_num, # للترتيب
+            "رقم العمود": column_num   # للترتيب
         })
 
     df = pd.DataFrame(data)
-    
-    # الترتيب الصحيح: المحطة أولاً، ثم رقم الفيدر، ثم تسلسل الأعمدة داخل الفيدر
     df = df.sort_values(by=['المحطة', 'رقم الفيدر', 'رقم العمود'], ascending=[True, True, True])
     
+    # إزالة أعمدة الترتيب قبل العرض والتصدير
     return df.drop(columns=['رقم الفيدر', 'رقم العمود'])
 
 if uploaded_file:
     result_df = process_kmz(uploaded_file)
-    st.write("### معاينة البيانات المرتّبة (فيدر ثم عمود):")
+    st.write("### المعاينة النهائية:")
     st.dataframe(result_df)
     
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         result_df.to_excel(writer, index=False)
     
-    st.download_button("📥 تحميل ملف Excel المنسق", output.getvalue(), "Lighting_Report.xlsx")
+    st.download_button("📥 تحميل التقرير النهائي", output.getvalue(), "Lighting_Final_Report.xlsx")
