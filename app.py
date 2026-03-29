@@ -5,8 +5,8 @@ from lxml import etree
 import re
 import io
 
-st.set_page_config(page_title="مستخرج بيانات المحطات", layout="wide")
-st.title("📂 نظام استخراج وتصنيف محطات الإنارة (نمط ج)")
+st.set_page_config(page_title="مستخرج بيانات المحطات الاحترافي", layout="wide")
+st.title("📂 نظام تصنيف شبكة الإنارة (تنسيق ملف 904ج)")
 
 uploaded_files = st.file_uploader("اختر ملفات KMZ", type=['kmz'], accept_multiple_files=True)
 
@@ -23,34 +23,29 @@ def process_kmz(file):
         name_text = pm.xpath("./kml:name/text()", namespaces=ns)
         full_name = name_text[0].strip() if name_text else ""
 
-        # 1. التعرف على المحطة (نمط ج557 أو ج900 أو A12)
-        # يبحث عن حرف عربي أو إنجليزي ملتصق به أرقام
-        station_match = re.search(r'([\u0600-\u06FFa-zA-Z]+\d+)', full_name)
+        # استخراج رقم المحطة (يدعم 904ج أو ج904)
+        station_match = re.search(r'(\d+[\u0600-\u06FF]+|[\u0600-\u06FF]+\d+)', full_name)
         station_code = station_match.group(1) if station_match else "غير محدد"
 
-        # 2. استخراج بقية الأرقام (الفيدر والعمود)
-        # نقوم بإزالة نص المحطة من الاسم الكامل أولاً لضمان دقة استخراج الأرقام الأخرى
-        remaining_text = full_name.replace(station_code, "")
-        other_numbers = re.findall(r'\d+', remaining_text)
+        # تنظيف النص لاستخراج أرقام العمود والفيدر بدقة
+        clean_name = full_name.replace(station_code, "")
+        nums = re.findall(r'\d+', clean_name)
         
-        # الترتيب الافتراضي: أول رقم بعد المحطة هو العمود، والثاني هو الفيدر (أو حسب ملفك)
-        column_num = int(other_numbers[0]) if len(other_numbers) >= 1 else 0
-        feeder_num = int(other_numbers[1]) if len(other_numbers) >= 2 else 0
+        column_num = int(nums[0]) if len(nums) >= 1 else 0
+        feeder_num = int(nums[1]) if len(nums) >= 2 else 0
 
-        # 3. استخراج طول العمود من الوصف أو الاسم
-        desc = pm.xpath("./kml:description/text()", namespaces=ns)
-        desc_text = desc[0] if desc else ""
-        search_area = (full_name + " " + desc_text).lower()
+        # استخراج الطول
+        desc = "".join(pm.xpath("./kml:description/text()", namespaces=ns))
+        ext_vals = " ".join(pm.xpath(".//kml:Data/kml:value/text()", namespaces=ns))
+        search_area = (full_name + " " + desc + " " + ext_vals).lower()
         
         val_height = ""
-        # البحث عن نمط "10م" أو "12 م" أو "8m"
         h_match = re.search(r'(\d{1,2})\s*(?:متر|م|m)\b', search_area)
         if h_match:
             val_height = h_match.group(1)
-        elif "هاي ماست" in search_area:
+        elif "هاي ماست" in search_area or "highmast" in search_area:
             val_height = "هاي ماست"
 
-        # 4. الإحداثيات
         coords = pm.xpath(".//kml:coordinates/text()", namespaces=ns)
         lat_val, lon_val = 0.0, 0.0
         if coords:
@@ -71,60 +66,60 @@ def process_kmz(file):
 if uploaded_files:
     all_dfs = [process_kmz(f) for f in uploaded_files]
     df = pd.concat(all_dfs, ignore_index=True)
-
-    # ترتيب البيانات لتجميع المحطات
+    
+    # الترتيب لضمان تجميع المحطات تحت بعضها
     df = df.sort_values(by=['المحطة', 'رقم الفيدر', 'رقم العمود'])
     
-    # تحديد المكررات (أزرق)
+    # تحديد المكررات (بناءً على المحطة والفيدر والعمود)
     is_duplicate = df.duplicated(subset=['المحطة', 'رقم الفيدر', 'رقم العمود'], keep=False)
 
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         workbook = writer.book
-        worksheet = workbook.add_worksheet('MainData')
+        worksheet = workbook.add_worksheet('Data')
         worksheet.right_to_left()
 
-        # التنسيقات (مطابقة للمثال)
-        header_fmt = workbook.add_format({'bold': True, 'bg_color': '#BFBFBF', 'border': 1, 'align': 'center'})
+        # تعريف التنسيقات بناءً على الصورة المرفقة
+        header_fmt = workbook.add_format({'bold': True, 'bg_color': '#BFBFBF', 'border': 1, 'align': 'center', 'valign': 'vcenter'})
         station_col_fmt = workbook.add_format({'bg_color': '#595959', 'font_color': 'white', 'bold': True, 'border': 1, 'align': 'center'})
-        dup_fmt = workbook.add_format({'bg_color': '#DDEBF7', 'border': 1, 'align': 'center'}) # أزرق فاتح للمكرر
+        dup_row_fmt = workbook.add_format({'bg_color': '#BDD7EE', 'border': 1, 'align': 'center'}) # أزرق للمكرر
         normal_fmt = workbook.add_format({'border': 1, 'align': 'center'})
 
         # كتابة العناوين
         for col_num, col_name in enumerate(df.columns):
             worksheet.write(0, col_num, col_name, header_fmt)
-            worksheet.set_column(col_num, col_num, 15)
+            worksheet.set_column(col_num, col_num, 18)
 
-        curr_row = 1
-        last_st = None
+        curr_excel_row = 1
+        last_station = None
 
         for idx, row in df.iterrows():
-            # إضافة صف فارغ عند تغيير المحطة (مثل الصورة)
-            if last_st is not None and row['المحطة'] != last_st:
-                curr_row += 1
+            # إضافة صف فارغ عند الانتقال لمحطة جديدة
+            if last_station is not None and row['المحطة'] != last_station:
+                curr_excel_row += 1 
 
             row_is_dup = is_duplicate.loc[idx]
 
             for col_idx, col_name in enumerate(df.columns):
                 val = row[col_name]
                 
-                # اختيار التنسيق
+                # تطبيق منطق الألوان
                 if row_is_dup:
-                    fmt = dup_fmt
+                    fmt = dup_row_fmt
                 elif col_name == "المحطة":
                     fmt = station_col_fmt
                 else:
                     fmt = normal_fmt
                 
-                worksheet.write(curr_row, col_idx, val, fmt)
+                worksheet.write(curr_excel_row, col_idx, val, fmt)
             
-            last_st = row['المحطة']
-            curr_row += 1
+            last_station = row['المحطة']
+            curr_excel_row += 1
 
-    st.success("✅ تم التعرف على المحطات وتنظيم الجدول بنجاح.")
+    st.success("✅ تم استخراج البيانات وتنسيقها بنجاح!")
     st.download_button(
-        label="📥 تحميل ملف الإكسيل المنسق (ج557 / ج900)",
+        label="📥 تحميل التقرير النهائي المنسق",
         data=output.getvalue(),
-        file_name="Station_Grid_Report.xlsx",
+        file_name="Lighting_Grid_Report.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
