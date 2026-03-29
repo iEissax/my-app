@@ -6,7 +6,7 @@ import re
 import io
 
 st.set_page_config(page_title="مستخرج بيانات المحطات", layout="wide")
-st.title("📂 مستخرج بيانات KMZ - التنسيق النهائي المعتمد")
+st.title("📂 مستخرج بيانات KMZ - نظام تصنيف الأطوال والأذرعة")
 
 uploaded_files = st.file_uploader("اختر ملفات KMZ", type=['kmz'], accept_multiple_files=True)
 
@@ -24,42 +24,42 @@ def process_kmz(file):
         full_name = name_text[0].strip() if name_text else ""
 
         # 1. التعرف على رقم المحطة (مثل 904ج أو ج557)
-        # تم تبسيط النمط لتفادي أخطاء الـ PatternError
         station_match = re.search(r'(\d+[\u0600-\u06FF]+|[\u0600-\u06FF]+\d+)', full_name)
         station_code = station_match.group(1) if station_match else "غير محدد"
 
-        # 2. استخراج أرقام العمود والفيدر
+        # 2. استخراج أرقام العمود والفيدر من الاسم
         clean_name = full_name.replace(station_code, "")
         nums = re.findall(r'\d+', clean_name)
-        column_num = int(nums[0]) if len(nums) >= 1 else 0
-        feeder_num = int(nums[1]) if len(nums) >= 2 else 0
+        column_num = int(nums[0]) if len(nums) >= 1 else ""
+        feeder_num = int(nums[1]) if len(nums) >= 2 else ""
 
-        # 3. جلب النصوص للبحث عن الطول والأذرعة
+        # 3. جلب النصوص للبحث عن (الطول / الذراع / الحالة)
         desc = "".join(pm.xpath("./kml:description/text()", namespaces=ns))
-        # جلب البيانات من حقول القيمة سواء كانت Data أو SimpleData
         ext_vals = " ".join(pm.xpath(".//kml:value/text()", namespaces=ns))
-        search_area = (full_name + " " + desc + " " + ext_vals).strip().lower()
+        search_area = (full_name + " " + desc + " " + ext_vals).strip()
 
-        # --- استخراج الطول (تم إصلاح المنطق لضمان الظهور) ---
         val_height = ""
-        if "هاي" in search_area or "mast" in search_area:
-            val_height = "هاي ماست"
-        elif "جداري" in search_area:
-            val_height = "جداري"
-        else:
-            # البحث عن أرقام الأطوال القياسية
-            h_match = re.search(r'\b(12|10|8|6|5)\b', search_area)
-            if h_match:
-                val_height = h_match.group(1)
+        val_arms = ""
 
-        # --- استخراج الأذرعة ---
-        lamps = ""
-        if val_height == "هاي ماست":
-            lamps = 6
-        elif any(kw in search_area for kw in ["دبل", "double", "2/2", "ثنائي"]):
-            lamps = 2
-        elif any(kw in search_area for kw in ["مفرد", "single", "1/1"]):
-            lamps = 1
+        # --- منطق الاستخراج بناءً على مثالك (9/2/2) ---
+        # البحث عن نمط أرقام مفصولة بـ / أو -
+        pattern_match = re.search(r'(\d+)[/-](\d+)[/-](\d+)', search_area)
+        
+        if pattern_match:
+            val_height = pattern_match.group(1) # الرقم الأول هو الطول (9)
+            val_arms = pattern_match.group(2)   # الرقم الثاني هو الذراع (2)
+        else:
+            # إذا لم يجد النمط، يبحث عن الكلمات التقليدية
+            if "هاي" in search_area.lower() or "mast" in search_area.lower():
+                val_height = "هاي ماست"
+                val_arms = 6
+            elif "جداري" in search_area:
+                val_height = "جداري"
+                val_arms = 1
+            else:
+                # بحث عن طول منفرد (12, 10, 8)
+                h_match = re.search(r'\b(12|10|9|8|6|5)\b', search_area)
+                val_height = h_match.group(1) if h_match else ""
 
         # 4. تحديد التفاصيل (مفقود/مغروز)
         details = ""
@@ -79,7 +79,7 @@ def process_kmz(file):
             "رقم الفيدر": feeder_num,
             "رقم العمود": column_num,
             "طول العمود": val_height,
-            "الذراع": lamps,
+            "الذراع": val_arms,
             "الاحداثيات x": lon_val,
             "الاحداثيات y": lat_val,
             "التفاصيل": details
@@ -99,7 +99,7 @@ if uploaded_files:
         worksheet = workbook.add_worksheet('Data')
         worksheet.right_to_left()
 
-        # تنسيقات الخط الأسود
+        # التنسيقات (الخط أسود)
         header_fmt = workbook.add_format({'bold': True, 'bg_color': '#D9D9D9', 'border': 1, 'align': 'center', 'font_color': 'black'})
         station_fmt = workbook.add_format({'bg_color': '#7F7F7F', 'border': 1, 'align': 'center', 'font_color': 'black', 'bold': True})
         dup_fmt = workbook.add_format({'bg_color': '#DDEBF7', 'border': 1, 'align': 'center', 'font_color': 'black'})
@@ -132,5 +132,5 @@ if uploaded_files:
             last_st = row['المحطة']
             curr_row += 1
 
-    st.success("✅ تم إصلاح الخطأ البرمجي وضمان ظهور الأطوال.")
-    st.download_button(label="📥 تحميل الملف النهائي", data=output.getvalue(), file_name="Final_Station_Report.xlsx")
+    st.success("✅ تم تحديث المنطق ليتعرف على نمط (الطول/الذراع) بنجاح.")
+    st.download_button(label="📥 تحميل التقرير النهائي المنسق", data=output.getvalue(), file_name="Lighting_Grid_Final.xlsx")
