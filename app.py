@@ -5,12 +5,12 @@ from lxml import etree
 import re
 import io
 
-# دالة لضمان الترتيب الطبيعي (1, 2, 10 بدلاً من 1, 10, 2)
+# دالة الترتيب الطبيعي (1, 2, 10)
 def natural_sort_key(s):
     return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', str(s))]
 
-st.set_page_config(page_title="مستخرج بيانات المحطات المطور", layout="wide")
-st.title("📂 مستخرج بيانات KMZ - الإصدار المهني المعتمد")
+st.set_page_config(page_title="مستخرج بيانات المحطات", layout="wide")
+st.title("📂 مستخرج KMZ - فصل رقم العمود عن نمط الطول")
 
 uploaded_files = st.file_uploader("اختر ملفات KMZ", type=['kmz'], accept_multiple_files=True)
 
@@ -24,123 +24,105 @@ def process_kmz(file):
     data = []
 
     for pm in tree.xpath("//kml:Placemark", namespaces=ns):
+        # --- 1. استخراج العنوان (Name) ---
         name_text = pm.xpath("./kml:name/text()", namespaces=ns)
         full_name = name_text[0].strip() if name_text else ""
+        
+        # --- 2. استخراج رقم المحطة ورقم العمود من العنوان ---
+        # استخراج المحطة (مثل ج557)
+        st_match = re.search(r'(\d+[\u0600-\u06FF]+|[\u0600-\u06FF]+\d+)', full_name)
+        station_code = st_match.group(1) if st_match else "غير محدد"
+        
+        # استخراج رقم العمود من العنوان (الرقم الذي يتبقى في العنوان بعد حذف المحطة)
+        clean_name = full_name.replace(station_code, "").strip()
+        name_nums = re.findall(r'\d+', clean_name)
+        column_num = name_nums[0] if name_nums else ""
 
-        # 1. التعرف على رقم المحطة (مثل 904ج أو ج557)
-        station_match = re.search(r'(\d+[\u0600-\u06FF]+|[\u0600-\u06FF]+\d+)', full_name)
-        station_code = station_match.group(1) if station_match else "غير محدد"
-
-        # 2. جلب النصوص للبحث عن البيانات والحالة
+        # --- 3. استخراج الطول والأذرعة من الوصف (النمط 12/2/1) ---
         desc = "".join(pm.xpath("./kml:description/text()", namespaces=ns))
-        ext_vals = " ".join(pm.xpath(".//kml:value/text()", namespaces=ns))
-        search_area = (full_name + " " + desc + " " + ext_vals).strip()
-
-        # 3. منطق استخراج (الطول / الذراع / رقم العمود) من النمط 12/2/1
-        # تنظيف النص من اسم المحطة لاستخراج الأرقام فقط
-        clean_text = full_name.replace(station_code, "").strip()
-        nums = re.findall(r'\d+', clean_text)
+        ext_data = " ".join(pm.xpath(".//kml:value/text()", namespaces=ns))
         
-        val_height, val_arms, column_num = "", "", ""
+        # البحث عن نمط الأرقام المائلة في الوصف أو البيانات الإضافية
+        # نبحث عن نمط X/Y/Z
+        pattern_match = re.findall(r'(\d+)[/-](\d+)', desc + " " + ext_data)
         
-        if len(nums) >= 3:
-            val_height = nums[0]  # الرقم الأول: طول العمود (مثلاً 12)
-            val_arms = nums[1]    # الرقم الثاني: الذراع (مثلاً 2)
-            column_num = nums[2]  # الرقم الثالث: رقم العمود (مثلاً 1)
-        elif len(nums) == 2:
-            val_height = nums[0]
-            column_num = nums[1]
-        elif len(nums) == 1:
-            column_num = nums[0]
+        val_height, val_arms = "", ""
+        if pattern_match:
+            val_height = pattern_match[0][0] # الرقم الأول هو الطول (12)
+            val_arms = pattern_match[0][1]   # الرقم الثاني هو الذراع (2)
+        else:
+            # محاولة أخيرة إذا لم يجد النمط المائل، يبحث عن أرقام مفردة
+            h_search = re.search(r'\b(12|10|8|6|5)\b', desc + " " + ext_data)
+            if h_search: val_height = h_search.group(1)
 
-        # معالجة الكلمات الخاصة إذا لم تكن الأرقام موجودة
-        if not val_height:
-            if "هاي" in search_area.lower() or "mast" in search_area.lower():
-                val_height, val_arms = "هاي ماست", 6
-            elif "جداري" in search_area.lower():
-                val_height, val_arms = "جداري", 1
-            else:
-                h_match = re.search(r'\b(12|10|8|6|5)\b', search_area)
-                if h_match: val_height = h_match.group(1)
+        # الحالات الخاصة
+        all_info_lower = (full_name + " " + desc + " " + ext_data).lower()
+        if "هاي" in all_info_lower or "mast" in all_info_lower:
+            val_height, val_arms = "هاي ماست", 6
+        elif "جداري" in all_info_lower:
+            val_height, val_arms = "جداري", 1
 
-        # 4. تحديد التفاصيل (مفقود/مغروز) لغرض التلوين
-        details = ""
-        if "مفقود" in search_area: details = "مفقود"
-        elif "مغروز" in search_area: details = "مغروز"
-
-        # 5. الإحداثيات (دقة خماسية)
+        # --- 4. الإحداثيات (خماسية) ---
         coords = pm.xpath(".//kml:coordinates/text()", namespaces=ns)
-        lat_val, lon_val = 0.0, 0.0
+        lat, lon = 0.0, 0.0
         if coords:
             c_split = coords[0].strip().split(',')
-            lat_val = round(float(c_split[1]), 5)
-            lon_val = round(float(c_split[0]), 5)
+            lat, lon = round(float(c_split[1]), 5), round(float(c_split[0]), 5)
+
+        # --- 5. الحالة ---
+        detail = "مفقود" if "مفقود" in all_info_lower else ("مغروز" if "مغروز" in all_info_lower else "")
 
         data.append({
             "المحطة": station_code,
             "رقم العمود": column_num,
             "طول العمود": val_height,
             "الذراع": val_arms,
-            "الاحداثيات x": lon_val,
-            "الاحداثيات y": lat_val,
-            "التفاصيل": details
+            "الاحداثيات x": lon,
+            "الاحداثيات y": lat,
+            "التفاصيل": detail
         })
     return pd.DataFrame(data)
 
 if uploaded_files:
-    all_dfs = [process_kmz(f) for f in uploaded_files]
-    df = pd.concat(all_dfs, ignore_index=True)
-    
-    # تحويل رقم العمود إلى أرقام للفرز الصحيح
+    all_data = [process_kmz(f) for f in uploaded_files]
+    df = pd.concat(all_data, ignore_index=True)
+
+    # الترتيب الطبيعي حسب المحطة ثم رقم العمود
     df['رقم العمود'] = pd.to_numeric(df['رقم العمود'], errors='coerce').fillna(0).astype(int)
-    
-    # الترتيب حسب المحطة (طبيعي) ثم رقم العمود
-    df = df.sort_values(
-        by=['المحطة', 'رقم العمود'], 
-        key=lambda x: x.map(natural_sort_key) if x.name == 'المحطة' else x
-    )
-    
+    df = df.sort_values(by=['المحطة', 'رقم العمود'], key=lambda x: x.map(natural_sort_key) if x.name == 'المحطة' else x)
+
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         workbook = writer.book
         worksheet = workbook.add_worksheet('Data')
         worksheet.right_to_left()
 
-        # تعريف التنسيقات (الخط أسود دائماً)
-        header_fmt = workbook.add_format({'bold': True, 'bg_color': '#D9D9D9', 'border': 1, 'align': 'center', 'font_color': 'black'})
-        station_fmt = workbook.add_format({'bg_color': '#7F7F7F', 'border': 1, 'align': 'center', 'font_color': 'black', 'bold': True})
-        red_fmt = workbook.add_format({'bg_color': '#FF0000', 'border': 1, 'align': 'center', 'font_color': 'black'})
-        normal_fmt = workbook.add_format({'border': 1, 'align': 'center', 'font_color': 'black'})
-        coord_fmt = workbook.add_format({'border': 1, 'align': 'center', 'font_color': 'black', 'num_format': '0.00000'})
+        # التنسيقات (خط أسود)
+        f_head = workbook.add_format({'bold': True, 'bg_color': '#D9D9D9', 'border': 1, 'align': 'center', 'font_color': 'black'})
+        f_stat = workbook.add_format({'bg_color': '#7F7F7F', 'border': 1, 'align': 'center', 'font_color': 'black', 'bold': True})
+        f_red = workbook.add_format({'bg_color': '#FF0000', 'border': 1, 'align': 'center', 'font_color': 'black'})
+        f_norm = workbook.add_format({'border': 1, 'align': 'center', 'font_color': 'black'})
+        f_coord = workbook.add_format({'border': 1, 'align': 'center', 'font_color': 'black', 'num_format': '0.00000'})
 
-        # كتابة العناوين
         cols = ["المحطة", "رقم العمود", "طول العمود", "الذراع", "الاحداثيات x", "الاحداثيات y", "التفاصيل"]
-        for col_num, col_name in enumerate(cols):
-            worksheet.write(0, col_num, col_name, header_fmt)
-            worksheet.set_column(col_num, col_num, 15)
+        for i, col in enumerate(cols):
+            worksheet.write(0, i, col, f_head)
+            worksheet.set_column(i, i, 15)
 
-        curr_row = 1
-        last_st = None
-        
-        for idx, row in df.iterrows():
-            # إضافة صف فارغ عند تغيير المحطة
-            if last_st is not None and row['المحطة'] != last_st:
+        curr_row, last_st = 1, None
+        for _, row in df.iterrows():
+            if last_st and row['المحطة'] != last_st:
                 curr_row += 1 
 
-            row_is_red = str(row['التفاصيل']) in ["مفقود", "مغروز"]
+            is_red = row['التفاصيل'] in ["مفقود", "مغروز"]
+            for j, c_name in enumerate(cols):
+                val = row[c_name]
+                if is_red: f = f_red
+                elif c_name == "المحطة": f = f_stat
+                elif "الاحداثيات" in c_name: f = f_coord
+                else: f = f_norm
+                worksheet.write(curr_row, j, val, f)
+            last_st, curr_row = row['المحطة'], curr_row + 1
 
-            for col_idx, col_name in enumerate(cols):
-                val = row[col_name]
-                
-                if row_is_red: fmt = red_fmt
-                elif col_name == "المحطة": fmt = station_fmt
-                elif "الاحداثيات" in col_name: fmt = coord_fmt
-                else: fmt = normal_fmt
-                
-                worksheet.write(curr_row, col_idx, val, fmt)
-            
-            last_st = row['المحطة']
-            curr_row += 1
-
-    st.success("✅ تم استخراج البيانات وتنسيقها وفقاً للنمط المطلوب.")
-    st.download_button(label="📥 تحميل الملف النهائي", data=output.getvalue(), file_name="Station_Standard_Report.xlsx")
+    st.success("✅ تم الفصل بنجاح: رقم العمود من العنوان، والطول/الذراع من الوصف.")
+    st.download_button("📥 تحميل الملف النهائي", output.getvalue(), "Lighting_Standard_Report.xlsx")
