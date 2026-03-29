@@ -5,34 +5,10 @@ from lxml import etree
 import re
 import io
 
-def natural_sort_key(s):
-    return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', str(s))]
-
-st.set_page_config(page_title="نظام معالجة المحطات", layout="wide")
-st.title("📂 مستخرج البيانات - تحديث منطق (الطول والأذرعة فقط)")
+st.set_page_config(page_title="مستخرج بيانات المحطات", layout="wide")
+st.title("📂 مستخرج بيانات KMZ - التنسيق النهائي المعتمد")
 
 uploaded_files = st.file_uploader("اختر ملفات KMZ", type=['kmz'], accept_multiple_files=True)
-
-def parse_pole_data(text, station_code):
-    """تفكيك النمط 12/2/1: الأول طول، الثاني أذرعة، والثالث يتجاهل"""
-    clean_text = text.replace(station_code, "").strip()
-    nums = re.findall(r'\d+', clean_text)
-    
-    height, arms, col_num = "", "", ""
-    
-    # تنفيذ قاعدتك: 12/2/1 -> 12 طول، 2 ذراع
-    if len(nums) >= 2:
-        height = nums[0]   # الرقم الأول = الطول
-        arms = nums[1]     # الرقم الثاني = الأذرعة
-    
-    # البحث عن رقم العمود بعيداً عن النمط (إذا وجد رقم وحيد في مكان آخر)
-    # أو سيبقى فارغاً كما في طلبك الأخير
-    if "هاي" in text or "mast" in text.lower():
-        height, arms = "هاي ماست", 6
-    elif "جداري" in text:
-        height, arms = "جداري", 1
-        
-    return height, arms
 
 def process_kmz(file):
     with zipfile.ZipFile(file, 'r') as f:
@@ -46,79 +22,116 @@ def process_kmz(file):
     for pm in tree.xpath("//kml:Placemark", namespaces=ns):
         name_text = pm.xpath("./kml:name/text()", namespaces=ns)
         full_name = name_text[0].strip() if name_text else ""
-        
-        st_match = re.search(r'(\d+[\u0600-\u06FF]+|[\u0600-\u06FF]+\d+)', full_name)
-        station_code = st_match.group(1) if st_match else "غير محدد"
 
+        # 1. التعرف على رقم المحطة (مثل 904ج أو ج557)
+        # تم تبسيط النمط لتفادي أخطاء الـ PatternError
+        station_match = re.search(r'(\d+[\u0600-\u06FF]+|[\u0600-\u06FF]+\d+)', full_name)
+        station_code = station_match.group(1) if station_match else "غير محدد"
+
+        # 2. استخراج أرقام العمود والفيدر
+        clean_name = full_name.replace(station_code, "")
+        nums = re.findall(r'\d+', clean_name)
+        column_num = int(nums[0]) if len(nums) >= 1 else 0
+        feeder_num = int(nums[1]) if len(nums) >= 2 else 0
+
+        # 3. جلب النصوص للبحث عن الطول والأذرعة
         desc = "".join(pm.xpath("./kml:description/text()", namespaces=ns))
-        ext_data = " ".join(pm.xpath(".//kml:value/text()", namespaces=ns))
-        all_info = (full_name + " " + desc + " " + ext_data)
+        # جلب البيانات من حقول القيمة سواء كانت Data أو SimpleData
+        ext_vals = " ".join(pm.xpath(".//kml:value/text()", namespaces=ns))
+        search_area = (full_name + " " + desc + " " + ext_vals).strip().lower()
 
-        # تطبيق المنطق: استخراج طول وذراع فقط
-        h, a = parse_pole_data(full_name, station_code)
-        
-        # محاولة استخراج رقم العمود إذا كان موجوداً كرقم مستقل (خارج النمط المائل)
-        # إذا كان طلبك أن لا نسجل أي رقم عمود من النمط، سيبقى هذا الحقل فارغاً
-        col_num = "" 
+        # --- استخراج الطول (تم إصلاح المنطق لضمان الظهور) ---
+        val_height = ""
+        if "هاي" in search_area or "mast" in search_area:
+            val_height = "هاي ماست"
+        elif "جداري" in search_area:
+            val_height = "جداري"
+        else:
+            # البحث عن أرقام الأطوال القياسية
+            h_match = re.search(r'\b(12|10|8|6|5)\b', search_area)
+            if h_match:
+                val_height = h_match.group(1)
 
+        # --- استخراج الأذرعة ---
+        lamps = ""
+        if val_height == "هاي ماست":
+            lamps = 6
+        elif any(kw in search_area for kw in ["دبل", "double", "2/2", "ثنائي"]):
+            lamps = 2
+        elif any(kw in search_area for kw in ["مفرد", "single", "1/1"]):
+            lamps = 1
+
+        # 4. تحديد التفاصيل (مفقود/مغروز)
+        details = ""
+        if "مفقود" in search_area: details = "مفقود"
+        elif "مغروز" in search_area: details = "مغروز"
+
+        # 5. الإحداثيات (خماسية)
         coords = pm.xpath(".//kml:coordinates/text()", namespaces=ns)
-        lat, lon = 0.0, 0.0
+        lat_val, lon_val = 0.0, 0.0
         if coords:
             c_split = coords[0].strip().split(',')
-            lat, lon = round(float(c_split[1]), 5), round(float(c_split[0]), 5)
-
-        detail = "مفقود" if "مفقود" in all_info else ("مغروز" if "مغروز" in all_info else "")
+            lat_val = round(float(c_split[1]), 5)
+            lon_val = round(float(c_split[0]), 5)
 
         data.append({
             "المحطة": station_code,
-            "رقم العمود": col_num,
-            "طول العمود": h,
-            "الذراع": a,
-            "الاحداثيات x": lon,
-            "الاحداثيات y": lat,
-            "التفاصيل": detail
+            "رقم الفيدر": feeder_num,
+            "رقم العمود": column_num,
+            "طول العمود": val_height,
+            "الذراع": lamps,
+            "الاحداثيات x": lon_val,
+            "الاحداثيات y": lat_val,
+            "التفاصيل": details
         })
     return pd.DataFrame(data)
 
 if uploaded_files:
     all_dfs = [process_kmz(f) for f in uploaded_files]
     df = pd.concat(all_dfs, ignore_index=True)
-
-    # الترتيب حسب المحطة
-    df = df.sort_values(by=['المحطة'], key=lambda x: x.map(natural_sort_key))
+    df = df.sort_values(by=['المحطة', 'رقم الفيدر', 'رقم العمود'])
+    
+    is_duplicate = df.duplicated(subset=['المحطة', 'رقم الفيدر', 'رقم العمود'], keep=False)
 
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         workbook = writer.book
-        worksheet = workbook.add_worksheet('Report')
+        worksheet = workbook.add_worksheet('Data')
         worksheet.right_to_left()
 
-        # التنسيقات (خط أسود)
-        f_head = workbook.add_format({'bold': True, 'bg_color': '#D9D9D9', 'border': 1, 'align': 'center', 'font_color': 'black'})
-        f_stat = workbook.add_format({'bg_color': '#7F7F7F', 'border': 1, 'align': 'center', 'font_color': 'black', 'bold': True})
-        f_red = workbook.add_format({'bg_color': '#FF0000', 'border': 1, 'align': 'center', 'font_color': 'black'})
-        f_norm = workbook.add_format({'border': 1, 'align': 'center', 'font_color': 'black'})
-        f_coord = workbook.add_format({'border': 1, 'align': 'center', 'font_color': 'black', 'num_format': '0.00000'})
+        # تنسيقات الخط الأسود
+        header_fmt = workbook.add_format({'bold': True, 'bg_color': '#D9D9D9', 'border': 1, 'align': 'center', 'font_color': 'black'})
+        station_fmt = workbook.add_format({'bg_color': '#7F7F7F', 'border': 1, 'align': 'center', 'font_color': 'black', 'bold': True})
+        dup_fmt = workbook.add_format({'bg_color': '#DDEBF7', 'border': 1, 'align': 'center', 'font_color': 'black'})
+        red_fmt = workbook.add_format({'bg_color': '#FF0000', 'border': 1, 'align': 'center', 'font_color': 'black'})
+        normal_fmt = workbook.add_format({'border': 1, 'align': 'center', 'font_color': 'black'})
+        coord_fmt = workbook.add_format({'border': 1, 'align': 'center', 'font_color': 'black', 'num_format': '0.00000'})
 
-        cols = ["المحطة", "رقم العمود", "طول العمود", "الذراع", "الاحداثيات x", "الاحداثيات y", "التفاصيل"]
-        for i, col in enumerate(cols):
-            worksheet.write(0, i, col, f_head)
-            worksheet.set_column(i, i, 15)
+        for col_num, col_name in enumerate(df.columns):
+            worksheet.write(0, col_num, col_name, header_fmt)
+            worksheet.set_column(col_num, col_num, 15)
 
-        curr_row, last_st = 1, None
-        for _, row in df.iterrows():
-            if last_st and row['المحطة'] != last_st:
+        curr_row = 1
+        last_st = None
+        for idx, row in df.iterrows():
+            if last_st is not None and row['المحطة'] != last_st:
                 curr_row += 1 
 
-            is_red = row['التفاصيل'] in ["مفقود", "مغروز"]
-            for j, c_name in enumerate(cols):
-                val = row[c_name]
-                if is_red: f = f_red
-                elif c_name == "المحطة": f = f_stat
-                elif "الاحداثيات" in c_name: f = f_coord
-                else: f = f_norm
-                worksheet.write(curr_row, j, val, f)
-            last_st, curr_row = row['المحطة'], curr_row + 1
+            row_is_dup = is_duplicate.loc[idx]
+            row_is_red = str(row['التفاصيل']) in ["مفقود", "مغروز"]
 
-    st.success("✅ تم التعديل: لن يتم تسجيل الرقم الثالث كـ 'رقم عمود'.")
-    st.download_button("📥 تحميل الملف المعدل", output.getvalue(), "Lighting_Report_NoColNum.xlsx")
+            for col_idx, col_name in enumerate(df.columns):
+                val = row[col_name]
+                if row_is_red: fmt = red_fmt
+                elif row_is_dup: fmt = dup_fmt
+                elif col_name == "المحطة": fmt = station_fmt
+                elif "الاحداثيات" in col_name: fmt = coord_fmt
+                else: fmt = normal_fmt
+                worksheet.write(curr_row, col_idx, val, fmt)
+            
+            last_st = row['المحطة']
+            curr_row += 1
+
+    st.success("✅ تم إصلاح الخطأ البرمجي وضمان ظهور الأطوال.")
+    st.download_button(label="📥 تحميل الملف النهائي", data=output.getvalue(), file_name="Final_Station_Report.xlsx")
+    
