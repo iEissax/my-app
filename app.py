@@ -6,7 +6,7 @@ import re
 import io
 
 st.set_page_config(page_title="مستخرج بيانات المحطات", layout="wide")
-st.title("📂 مستخرج بيانات KMZ - نظام المحطات المطور")
+st.title("📂 مستخرج بيانات KMZ - إصدار معالجة الأطوال والأذرعة")
 
 uploaded_files = st.file_uploader("اختر ملفات KMZ", type=['kmz'], accept_multiple_files=True)
 
@@ -23,7 +23,7 @@ def process_kmz(file):
         name_text = pm.xpath("./kml:name/text()", namespaces=ns)
         full_name = name_text[0].strip() if name_text else ""
 
-        # 1. التعرف على رقم المحطة (ج557 أو 904ج)
+        # 1. التعرف على المحطة (ج557 أو 904ج)
         station_match = re.search(r'(\d+[\u0600-\u06FF]+|[\u0600-\u06FF]+\d+)', full_name)
         station_code = station_match.group(1) if station_match else "غير محدد"
 
@@ -33,32 +33,42 @@ def process_kmz(file):
         column_num = int(nums[0]) if len(nums) >= 1 else 0
         feeder_num = int(nums[1]) if len(nums) >= 2 else 0
 
-        # 3. جلب الوصف للحالة والطول والأذرعة
+        # 3. جلب كافة النصوص المتاحة للبحث (الاسم + الوصف + البيانات الإضافية)
         desc = "".join(pm.xpath("./kml:description/text()", namespaces=ns))
-        ext_vals = " ".join(pm.xpath(".//kml:Data/kml:value/text()", namespaces=ns))
+        # جلب البيانات من حقول <Data> أو <SimpleData>
+        ext_vals = " ".join(pm.xpath(".//kml:value/text()", namespaces=ns))
         search_area = (full_name + " " + desc + " " + ext_vals).strip()
 
-        # تحديد التفاصيل (مفقود/مغروز)
-        details = ""
-        if "مفقود" in search_area: details = "مفقود"
-        elif "مغروز" in search_area: details = "مغروز"
-
-        # استخراج الطول
+        # --- منطق استخراج الطول المطور ---
         val_height = ""
-        h_match = re.search(r'(\d{1,2})\s*(?:متر|م|m)\b', search_area.lower())
-        if h_match: 
-            val_height = h_match.group(1)
-        elif "هاي ماست" in search_area.lower(): 
+        # أولوية للكلمات الخاصة
+        if any(kw in search_area.lower() for kw in ["هاي ماست", "highmast", "high mast"]):
             val_height = "هاي ماست"
+        elif any(kw in search_area.lower() for kw in ["جداري", "wall"]):
+            val_height = "جداري"
+        else:
+            # البحث عن أرقام الأطوال المشهورة (12, 10, 8, 6) متبوعة بـ م أو متر أو مجردة في سياق الطول
+            height_match = re.search(r'\b(12|10|8|6|5)\b(?:\s*متر|\s*م|\s*m)?', search_area.lower())
+            if height_match:
+                val_height = height_match.group(1)
 
-        # 4. استخراج الأذرعة (الذراع)
+        # --- منطق استخراج الأذرعة ---
         lamps = ""
-        if "هاي ماست" in val_height:
+        if val_height == "هاي ماست":
             lamps = 6
-        elif any(kw in search_area.lower() for kw in ["دبل", "double", "2/2"]):
+        elif any(kw in search_area.lower() for kw in ["دبل", "double", "2/2", "ثنائي"]):
             lamps = 2
         elif any(kw in search_area.lower() for kw in ["مفرد", "single", "1/1"]):
             lamps = 1
+        else:
+            # محاولة استخراج أي رقم يعبر عن الأذرعة (1 أو 2) إذا وُجد في سياق الذراع
+            arm_match = re.search(r'\b([12])\b\s*(?Source|ذراع|شمعة)', search_area.lower())
+            if arm_match: lamps = arm_match.group(1)
+
+        # 4. تحديد التفاصيل (مفقود/مغروز)
+        details = ""
+        if "مفقود" in search_area: details = "مفقود"
+        elif "مغروز" in search_area: details = "مغروز"
 
         # 5. الإحداثيات (خماسية)
         coords = pm.xpath(".//kml:coordinates/text()", namespaces=ns)
@@ -73,7 +83,7 @@ def process_kmz(file):
             "رقم الفيدر": feeder_num,
             "رقم العمود": column_num,
             "طول العمود": val_height,
-            "الذراع": lamps,  # العمود الجديد بجانب الطول
+            "الالذراع": lamps,
             "الاحداثيات x": lon_val,
             "الاحداثيات y": lat_val,
             "التفاصيل": details
@@ -83,11 +93,8 @@ def process_kmz(file):
 if uploaded_files:
     all_dfs = [process_kmz(f) for f in uploaded_files]
     df = pd.concat(all_dfs, ignore_index=True)
-    
-    # الترتيب
     df = df.sort_values(by=['المحطة', 'رقم الفيدر', 'رقم العمود'])
     
-    # تحديد المكررات
     is_duplicate = df.duplicated(subset=['المحطة', 'رقم الفيدر', 'رقم العمود'], keep=False)
 
     output = io.BytesIO()
@@ -104,14 +111,12 @@ if uploaded_files:
         normal_fmt = workbook.add_format({'border': 1, 'align': 'center', 'font_color': 'black'})
         coord_fmt = workbook.add_format({'border': 1, 'align': 'center', 'font_color': 'black', 'num_format': '0.00000'})
 
-        # العناوين
         for col_num, col_name in enumerate(df.columns):
             worksheet.write(0, col_num, col_name, header_fmt)
             worksheet.set_column(col_num, col_num, 15)
 
         curr_row = 1
         last_st = None
-
         for idx, row in df.iterrows():
             if last_st is not None and row['المحطة'] != last_st:
                 curr_row += 1 
@@ -121,17 +126,15 @@ if uploaded_files:
 
             for col_idx, col_name in enumerate(df.columns):
                 val = row[col_name]
-                
                 if row_is_red: fmt = red_fmt
                 elif row_is_dup: fmt = dup_fmt
                 elif col_name == "المحطة": fmt = station_fmt
                 elif "الاحداثيات" in col_name: fmt = coord_fmt
                 else: fmt = normal_fmt
-                
                 worksheet.write(curr_row, col_idx, val, fmt)
             
             last_st = row['المحطة']
             curr_row += 1
 
-    st.success("✅ تم إضافة عمود الأذرعة وتنسيق الملف بالكامل.")
-    st.download_button(label="📥 تحميل التقرير النهائي", data=output.getvalue(), file_name="Lighting_Report_With_Arms.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    st.success("✅ تم تحديث منطق استخراج الأطوال. يرجى التجربة الآن.")
+    st.download_button(label="📥 تحميل الملف المصحح", data=output.getvalue(), file_name="Fixed_Lighting_Report.xlsx")
