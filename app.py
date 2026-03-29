@@ -5,8 +5,8 @@ from lxml import etree
 import re
 import io
 
-st.set_page_config(page_title="مستخرج بيانات المحطات الاحترافي", layout="wide")
-st.title("📂 نظام تصنيف شبكة الإنارة (تنسيق ملف 904ج)")
+st.set_page_config(page_title="مستخرج بيانات المحطات", layout="wide")
+st.title("📂 نظام تصنيف شبكة الإنارة - إحداثيات خماسية")
 
 uploaded_files = st.file_uploader("اختر ملفات KMZ", type=['kmz'], accept_multiple_files=True)
 
@@ -23,11 +23,11 @@ def process_kmz(file):
         name_text = pm.xpath("./kml:name/text()", namespaces=ns)
         full_name = name_text[0].strip() if name_text else ""
 
-        # استخراج رقم المحطة (يدعم 904ج أو ج904)
+        # استخراج رقم المحطة (904ج أو ج904)
         station_match = re.search(r'(\d+[\u0600-\u06FF]+|[\u0600-\u06FF]+\d+)', full_name)
         station_code = station_match.group(1) if station_match else "غير محدد"
 
-        # تنظيف النص لاستخراج أرقام العمود والفيدر بدقة
+        # تنظيف النص لاستخراج أرقام العمود والفيدر
         clean_name = full_name.replace(station_code, "")
         nums = re.findall(r'\d+', clean_name)
         
@@ -36,22 +36,20 @@ def process_kmz(file):
 
         # استخراج الطول
         desc = "".join(pm.xpath("./kml:description/text()", namespaces=ns))
-        ext_vals = " ".join(pm.xpath(".//kml:Data/kml:value/text()", namespaces=ns))
-        search_area = (full_name + " " + desc + " " + ext_vals).lower()
-        
+        search_area = (full_name + " " + desc).lower()
         val_height = ""
         h_match = re.search(r'(\d{1,2})\s*(?:متر|م|m)\b', search_area)
-        if h_match:
-            val_height = h_match.group(1)
-        elif "هاي ماست" in search_area or "highmast" in search_area:
-            val_height = "هاي ماست"
+        if h_match: val_height = h_match.group(1)
+        elif "هاي ماست" in search_area: val_height = "هاي ماست"
 
+        # الإحداثيات
         coords = pm.xpath(".//kml:coordinates/text()", namespaces=ns)
         lat_val, lon_val = 0.0, 0.0
         if coords:
             c_split = coords[0].strip().split(',')
-            lat_val = float(c_split[1])
-            lon_val = float(c_split[0])
+            # تقريب الإحداثيات لـ 5 خانات عشرية (خماسيات)
+            lat_val = round(float(c_split[1]), 5)
+            lon_val = round(float(c_split[0]), 5)
 
         data.append({
             "المحطة": station_code,
@@ -66,11 +64,8 @@ def process_kmz(file):
 if uploaded_files:
     all_dfs = [process_kmz(f) for f in uploaded_files]
     df = pd.concat(all_dfs, ignore_index=True)
-    
-    # الترتيب لضمان تجميع المحطات تحت بعضها
     df = df.sort_values(by=['المحطة', 'رقم الفيدر', 'رقم العمود'])
     
-    # تحديد المكررات (بناءً على المحطة والفيدر والعمود)
     is_duplicate = df.duplicated(subset=['المحطة', 'رقم الفيدر', 'رقم العمود'], keep=False)
 
     output = io.BytesIO()
@@ -79,11 +74,14 @@ if uploaded_files:
         worksheet = workbook.add_worksheet('Data')
         worksheet.right_to_left()
 
-        # تعريف التنسيقات بناءً على الصورة المرفقة
-        header_fmt = workbook.add_format({'bold': True, 'bg_color': '#BFBFBF', 'border': 1, 'align': 'center', 'valign': 'vcenter'})
-        station_col_fmt = workbook.add_format({'bg_color': '#595959', 'font_color': 'white', 'bold': True, 'border': 1, 'align': 'center'})
-        dup_row_fmt = workbook.add_format({'bg_color': '#BDD7EE', 'border': 1, 'align': 'center'}) # أزرق للمكرر
-        normal_fmt = workbook.add_format({'border': 1, 'align': 'center'})
+        # التنسيقات مع توحيد لون الخط للأسود (font_color: black)
+        header_fmt = workbook.add_format({'bold': True, 'bg_color': '#BFBFBF', 'border': 1, 'align': 'center', 'font_color': 'black'})
+        station_col_fmt = workbook.add_format({'bg_color': '#7F7F7F', 'font_color': 'black', 'bold': True, 'border': 1, 'align': 'center'})
+        dup_row_fmt = workbook.add_format({'bg_color': '#DDEBF7', 'border': 1, 'align': 'center', 'font_color': 'black'})
+        normal_fmt = workbook.add_format({'border': 1, 'align': 'center', 'font_color': 'black'})
+        
+        # تنسيق خاص للأرقام العشرية (الخماسيات)
+        coord_fmt = workbook.add_format({'border': 1, 'align': 'center', 'font_color': 'black', 'num_format': '0.00000'})
 
         # كتابة العناوين
         for col_num, col_name in enumerate(df.columns):
@@ -94,7 +92,6 @@ if uploaded_files:
         last_station = None
 
         for idx, row in df.iterrows():
-            # إضافة صف فارغ عند الانتقال لمحطة جديدة
             if last_station is not None and row['المحطة'] != last_station:
                 curr_excel_row += 1 
 
@@ -103,11 +100,13 @@ if uploaded_files:
             for col_idx, col_name in enumerate(df.columns):
                 val = row[col_name]
                 
-                # تطبيق منطق الألوان
+                # اختيار التنسيق المناسب
                 if row_is_dup:
                     fmt = dup_row_fmt
                 elif col_name == "المحطة":
                     fmt = station_col_fmt
+                elif "الاحداثيات" in col_name:
+                    fmt = coord_fmt
                 else:
                     fmt = normal_fmt
                 
@@ -116,10 +115,10 @@ if uploaded_files:
             last_station = row['المحطة']
             curr_excel_row += 1
 
-    st.success("✅ تم استخراج البيانات وتنسيقها بنجاح!")
+    st.success("✅ تم التنسيق: خطوط سوداء، إحداثيات خماسية، وفواصل بين المحطات.")
     st.download_button(
-        label="📥 تحميل التقرير النهائي المنسق",
+        label="📥 تحميل التقرير النهائي",
         data=output.getvalue(),
-        file_name="Lighting_Grid_Report.xlsx",
+        file_name="Lighting_Report_Final.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
