@@ -4,3 +4,4 @@ pandas
 numpy
 Pillow
 opencv-python-headless
+pdf2image
