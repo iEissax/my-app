@@ -1,4 +1,6 @@
+streamlit
+easyocr
 pandas
-lxml
-xlsxwriter
-openpyxl
+numpy
+Pillow
+opencv-python-headless
